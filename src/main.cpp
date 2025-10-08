@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "CANCREATE.h"
+#define Vread() 
 /*GPIOの値の設定*/
 #define serial1RX 21 /*シリアル変換モジュール*/
 #define serial1TX 18
@@ -7,22 +8,22 @@
 #define VALVESET 4
 #define DUMP 34
 #define FIRE 35
-#define FD 17
+#define NOD 17
 #define MCU_LUMP 15
 #define CAN_TX 32
 #define CAN_RX 33
 #define NICHROME_SIGNAL 0x10a
 
-constexpr short readpins[5] = {GPIO_NUM_16, GPIO_NUM_4, GPIO_NUM_34, GPIO_NUM_35, GPIO_NUM_17};
+constexpr uint8_t readpins[5] = {GPIO_NUM_16, GPIO_NUM_4, GPIO_NUM_34, GPIO_NUM_35, GPIO_NUM_17};
 unsigned long lastTime = 0;
 short led_blink_count = 0;
 /*以下はデバウンス用*/
 char iffirepushingwithdebouce = 0;
-char ifFDpushingwithdebouce = 0;
+char ifNODpushingwithdebouce = 0;
 unsigned long firedebouncetime = 0;
-unsigned long FDdebouncetime = 0;
+unsigned long NODdebouncetime = 0;
 bool firecheck = false;
-bool FDcheck = false;
+bool NODcheck = false;
 CAN_CREATE CAN(true);
 void setup()
 {
@@ -74,8 +75,8 @@ void send()
   uint8_t data = 0;
   data |= (digitalRead(DUMP) & 1) << 0;
   data |= (digitalRead(FILL) & 1) << 1;
-  data |= ((iffirepushingwithdebouce & (!digitalRead(FD))) & 1) << 2;
-  data |= (ifFDpushingwithdebouce) << 3;
+  data |= ((iffirepushingwithdebouce & (!digitalRead(NOD))) & 1) << 2;
+  data |= (ifNODpushingwithdebouce) << 3;
   data |= (digitalRead(VALVESET) & 1) << 4;
   if (CAN.sendData(0x101, &data, 1))
   {
@@ -104,22 +105,22 @@ void updatepins()
     iffirepushingwithdebouce = 0;
     firecheck = false;
   }
-  if (digitalRead(FD) == HIGH)
+  if (digitalRead(NOD) == HIGH)
   {
-    if (!FDcheck)
+    if (!NODcheck)
     {
-      FDdebouncetime = millis();
-      FDcheck = true;
+      NODdebouncetime = millis();
+      NODcheck = true;
     }
-    if (FDdebouncetime != 0 && millis() - FDdebouncetime > 20)
+    if (NODdebouncetime != 0 && millis() - NODdebouncetime > 20)
     {
-      ifFDpushingwithdebouce = 1;
+      ifNODpushingwithdebouce = 1;
     }
   }
   else
   {
-    ifFDpushingwithdebouce = 0;
-    FDcheck = false;
+    ifNODpushingwithdebouce = 0;
+    NODcheck = false;
   }
 }
 
