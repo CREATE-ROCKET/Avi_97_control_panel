@@ -1,164 +1,238 @@
 #include <Arduino.h>
 #include "CANCREATE.h"
-#define Vread() 
-/*GPIOの値の設定*/
-#define serial1RX 21 /*シリアル変換モジュール*/
-#define serial1TX 18
-#define FILL 16
-#define VALVESET 4
-#define DUMP 34
-#define FIRE 35
-#define NOD 17
-#define MCU_LUMP 15
-#define CAN_TX 32
-#define CAN_RX 33
-#define NICHROME_SIGNAL 0x10a
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 
-constexpr uint8_t readpins[5] = {GPIO_NUM_16, GPIO_NUM_4, GPIO_NUM_34, GPIO_NUM_35, GPIO_NUM_17};
-unsigned long lastTime = 0;
-short led_blink_count = 0;
-/*以下はデバウンス用*/
-char iffirepushingwithdebouce = 0;
-char ifNODpushingwithdebouce = 0;
-unsigned long firedebouncetime = 0;
-unsigned long NODdebouncetime = 0;
-bool firecheck = false;
-bool NODcheck = false;
+// --- Pin Definitions --- 12と13も使えるかも(separation に使う可能性)
+constexpr uint8_t FILL_PIN = 16;
+constexpr uint8_t VALVESET_PIN = 4;
+constexpr uint8_t DUMP_PIN = 34;
+constexpr uint8_t FIRE_PIN = 35;
+constexpr uint8_t FD_PIN = 17;
+constexpr uint8_t MCU_LUMP_PIN = 15;
+constexpr uint8_t CAN_TX_PIN = 32;
+constexpr uint8_t CAN_RX_PIN = 33;
+constexpr uint8_t SERIAL1_RX_PIN = 21;
+constexpr uint8_t SERIAL1_TX_PIN = 18;
+
+// --- CAN ID Definitions ---
+constexpr uint32_t CAN_ID_BUTTON_STATE = 0x101;
+constexpr uint32_t CAN_ID_MAIN_VALVE_ANGLE = 0x102;
+constexpr uint32_t CAN_ID_PLC_ACK = 0x103;
+
+// --- Constants ---
+constexpr long PLC_TIMEOUT_MS = 3000;
+constexpr int DEBOUNCE_DELAY_MS = 20;
+
+// --- Enums for State Management ---
+enum PLCStatus
+{
+  PLC_OK,
+  PLC_DEAD
+};
+enum ButtonState
+{
+  RELEASED,
+  WAITING_DEBOUNCE,
+  PRESSED
+};
+
+// --- Global State Variables & Mutexes ---
+PLCStatus plcStatus = PLC_OK;
+ButtonState fireButtonState = RELEASED;
+ButtonState FDButtonState = RELEASED;
+
+bool isFireButtonPressed = false;
+bool isfdPressed = false;
+
+unsigned long long lastPLCACK = 0;
+unsigned long long fireDebounceTimer = 0;
+unsigned long long fdDebounceTimer = 0;
+
+SemaphoreHandle_t plcStatusMutex;
+SemaphoreHandle_t buttonStateMutex;
+
 CAN_CREATE CAN(true);
+// --- Task & Function Prototypes ---
+void CANRecvTask(void *pvParameters);
+void CANSendTask(void *pvParameters);
+void updatePLCStatus();
+void updateButtonState(ButtonState &currentState, bool &isPressed, unsigned long long &debounceTimer, const uint8_t pin);
+
 void setup()
 {
-  pinMode(MCU_LUMP, OUTPUT);
+  pinMode(MCU_LUMP_PIN, OUTPUT);
+  pinMode(FILL_PIN, INPUT);
+  pinMode(VALVESET_PIN, INPUT);
+  pinMode(DUMP_PIN, INPUT);
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(FD_PIN, INPUT);
+
   Serial.begin(115200);
-  Serial1.begin(115200, SERIAL_8N1, serial1RX, serial1TX);
-  // tx,rx  32,33:コンパネ　　13,27:中継
-  Serial.println("CAN Sender");
-  // 100 kbpsでCANを動作させる
-  if (CAN.begin(100E3, CAN_RX, CAN_TX))
+  Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+
+  plcStatusMutex = xSemaphoreCreateMutex();
+  buttonStateMutex = xSemaphoreCreateMutex();
+
+  Serial.println("CAN Control Panel");
+  if (CAN.begin(100E3, CAN_RX_PIN, CAN_TX_PIN))
   {
-    Serial.println("Starting CAN failed!");
     while (1)
       ;
   }
-  for (int i = 0; i < 5; i++)
-  {
-    pinMode(readpins[i], INPUT);
-  }
-}
-
-void checkPLCisDEAD()
-{
-  // Serial.println(millis() - lastTime);
-  if (millis() - lastTime < 3000)
-  {
-    digitalWrite(MCU_LUMP, HIGH);
-  }
-  else
-  {
-    if (led_blink_count % 2 == 0)
-    {
-      digitalWrite(MCU_LUMP, LOW);
-    }
-    else
-    {
-      digitalWrite(MCU_LUMP, HIGH);
-    }
-    ++led_blink_count;
-  }
-  if (led_blink_count == 1000)
-  {
-    led_blink_count = 0;
-  }
-}
-
-void send()
-{ // send the switch data to the CAN bus in id 0x101(to plc)
-  uint8_t data = 0;
-  data |= (digitalRead(DUMP) & 1) << 0;
-  data |= (digitalRead(FILL) & 1) << 1;
-  data |= ((iffirepushingwithdebouce & (!digitalRead(NOD))) & 1) << 2;
-  data |= (ifNODpushingwithdebouce) << 3;
-  data |= (digitalRead(VALVESET) & 1) << 4;
-  if (CAN.sendData(0x101, &data, 1))
-  {
-    Serial.println("failed to send CAN data");
-  }
-}
-/*update the pins for the fire and FD buttons with debounce , witch is used to prevent the button from being pressed multiple times in a short time
-,but it is not used for the other buttons,so it is not used for the FILL and DUMP buttons. However, it is used for the VALVESET button.
-So, I will use the debounce for the fire and FD buttons. After all, I will use the debounce for the fire and FD buttons.*/
-void updatepins()
-{
-  if (digitalRead(FIRE) == HIGH)
-  {
-    if (!firecheck)
-    {
-      firedebouncetime = millis();
-      firecheck = true;
-    }
-    if (firedebouncetime != 0 && millis() - firedebouncetime > 20)
-    {
-      iffirepushingwithdebouce = 1;
-    }
-  }
-  else
-  {
-    iffirepushingwithdebouce = 0;
-    firecheck = false;
-  }
-  if (digitalRead(NOD) == HIGH)
-  {
-    if (!NODcheck)
-    {
-      NODdebouncetime = millis();
-      NODcheck = true;
-    }
-    if (NODdebouncetime != 0 && millis() - NODdebouncetime > 20)
-    {
-      ifNODpushingwithdebouce = 1;
-    }
-  }
-  else
-  {
-    ifNODpushingwithdebouce = 0;
-    NODcheck = false;
-  }
+  delay(3000);
+  xTaskCreateUniversal(CANRecvTask, "CANRecvTask", 2048, NULL, 1, NULL, APP_CPU_NUM);
+  xTaskCreateUniversal(CANSendTask, "CANSendTask", 2048, NULL, 1, NULL, APP_CPU_NUM);
+  // switch (CAN.test())
+  // {
+  // case CAN_SUCCESS:
+  //   Serial.println("Success!!!");
+  //   break;
+  // case CAN_UNKNOWN_ERROR:
+  //   Serial.println("Unknown error occurred");
+  //   break;
+  // case CAN_NO_RESPONSE_ERROR:
+  //   Serial.println("No response error");
+  //   break;
+  // case CAN_CONTROLLER_ERROR:
+  //   Serial.println("CAN CONTROLLER ERROR");
+  //   break;
+  // default:
+  //   break;
+  // }
 }
 
 void loop()
 {
-  checkPLCisDEAD();
-  send();
-  updatepins();
-  if (CAN.available())
+  updatePLCStatus();
+  updateButtonState(fireButtonState, isFireButtonPressed, fireDebounceTimer, FIRE_PIN);
+  updateButtonState(FDButtonState, isfdPressed, fdDebounceTimer, FD_PIN);
+  delay(100);
+}
+
+void updatePLCStatus()
+{
+  static short blink_count = 0;
+  xSemaphoreTake(plcStatusMutex, portMAX_DELAY);
+  if (millis() - lastPLCACK < PLC_TIMEOUT_MS)
   {
-    can_return_t message;
-    while (!CAN.readWithDetail(&message))
-    {
-      switch (message.id)
-      {
-      case 0x401: /*from main_valve*/
-        Serial1.print("innner angle is");
-        Serial1.println(message.data[0] - 128, DEC);
-        send();
-        break;
-      case 0x402: /*from fd_valve*/
-        Serial1.print("FD angle is");
-        Serial1.println(message.data[0] - 128, DEC);
-        send();
-        break;
-      case 0x403: /*from plc*/
-        lastTime = millis();
-        //   for (int i = 0; i < message.size; i++)
-        //   {
-        //     Serial1.print(message.data[i], BIN);
-        //     Serial1.print(" ");
-        //   }
-        break;
-      default:
-        break;
-      }
-      delay(1);
-    }
+    plcStatus = PLC_OK;
   }
-  delay(10);
+  else
+  {
+    plcStatus = PLC_DEAD;
+  }
+  xSemaphoreGive(plcStatusMutex);
+  switch (plcStatus)
+  {
+  case PLC_OK:
+    digitalWrite(MCU_LUMP_PIN, HIGH);
+    blink_count = 0;
+    break;
+  case PLC_DEAD:
+    // Blink the LED to indicate PLC is dead
+    digitalWrite(MCU_LUMP_PIN, (blink_count++ % 20 < 10) ? HIGH : LOW);
+    break;
+  }
+}
+
+void updateButtonState(ButtonState &currentState, bool &isPressed, unsigned long long &debounceTimer, const uint8_t pin)
+{
+  bool reading = digitalRead(pin);
+
+  xSemaphoreTake(buttonStateMutex, portMAX_DELAY);
+  switch (currentState)
+  {
+  case RELEASED:
+    if (reading)
+    {
+      debounceTimer = millis();
+      currentState = WAITING_DEBOUNCE;
+    }
+    isPressed = false;
+    break;
+  case WAITING_DEBOUNCE:
+    if (!reading)
+    {
+      currentState = RELEASED;
+    }
+    else if (millis() - debounceTimer > DEBOUNCE_DELAY_MS)
+    {
+      currentState = PRESSED;
+      isPressed = true;
+    }
+    break;
+  case PRESSED:
+    if (!reading)
+    {
+      currentState = RELEASED;
+    }
+    // isPressed remains true while the button is physically held down
+    break;
+  }
+  xSemaphoreGive(buttonStateMutex);
+}
+
+void CANRecvTask(void *pvParameters)
+{
+  while (1)
+  {
+    if (CAN.available())
+    {
+      can_return_t message;
+      if (!CAN.readWithDetail(&message))
+      {
+        Serial.print("Received CAN ID: 0x");
+        Serial.print(message.id, HEX);
+        switch (message.id)
+        {
+        case CAN_ID_MAIN_VALVE_ANGLE:
+          float angle;
+          memcpy(&angle, &message.data[4], sizeof(float));
+          Serial1.print("MainAngle: ");
+          Serial1.println(angle, DEC);
+          break;
+        case CAN_ID_PLC_ACK:
+          xSemaphoreTake(plcStatusMutex, portMAX_DELAY);
+          lastPLCACK = millis();
+          Serial.print("PLC ACK received at ");
+          Serial.println(millis()-lastPLCACK);
+          xSemaphoreGive(plcStatusMutex);
+          break;
+        default:
+          break;
+        }
+      }
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+void CANSendTask(void *pvParameters)
+{
+  while (1)
+  {
+    uint8_t data = 0;
+    uint8_t ack = 0;
+    bool firePressed, fdPressed;
+
+    xSemaphoreTake(buttonStateMutex, portMAX_DELAY);
+    firePressed = isFireButtonPressed;
+    fdPressed = isfdPressed;
+
+    data |= (digitalRead(DUMP_PIN) & 1) << 0;
+    data |= (digitalRead(FILL_PIN) & 1) << 1;
+    data |= (firePressed && !digitalRead(FD_PIN) && !digitalRead(FILL_PIN)) << 2; // FD押下中はFire無効
+    data |= (fdPressed) << 3;
+    data |= (digitalRead(VALVESET_PIN) & 1) << 4;
+    Serial.print("fd");
+    Serial.println(isfdPressed);
+    Serial.print("fire");
+    Serial.println(isFireButtonPressed);
+
+    xSemaphoreGive(buttonStateMutex);
+    CAN.sendData(CAN_ID_BUTTON_STATE, &data, 1);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+  }
 }
