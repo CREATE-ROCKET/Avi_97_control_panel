@@ -19,7 +19,8 @@ constexpr uint8_t SERIAL1_TX_PIN = 18;
 // --- CAN ID Definitions ---
 constexpr uint32_t CAN_ID_BUTTON_STATE = 0x101;
 constexpr uint32_t CAN_ID_MAIN_VALVE_ANGLE = 0x102;
-constexpr uint32_t CAN_ID_PLC_ACK = 0x103;
+constexpr uint32_t CAN_ID_FROM_PLC_ACK = 0x103;
+constexpr uint32_t CAN_ID_TO_PLC_ACK = 0x104;
 
 // --- Constants ---
 constexpr long PLC_TIMEOUT_MS = 3000;
@@ -81,9 +82,9 @@ void setup()
     while (1)
       ;
   }
-  delay(3000);
-  xTaskCreateUniversal(CANRecvTask, "CANRecvTask", 2048, NULL, 1, NULL, APP_CPU_NUM);
-  xTaskCreateUniversal(CANSendTask, "CANSendTask", 2048, NULL, 1, NULL, APP_CPU_NUM);
+  delay(1000);
+  xTaskCreateUniversal(CANRecvTask, "CANRecvTask", 2048, NULL, 0, NULL, APP_CPU_NUM);
+  xTaskCreateUniversal(CANSendTask, "CANSendTask", 2048, NULL, 0, NULL, APP_CPU_NUM);
   // switch (CAN.test())
   // {
   // case CAN_SUCCESS:
@@ -183,29 +184,33 @@ void CANRecvTask(void *pvParameters)
       can_return_t message;
       if (!CAN.readWithDetail(&message))
       {
-        Serial.print("Received CAN ID: 0x");
-        Serial.print(message.id, HEX);
         switch (message.id)
         {
         case CAN_ID_MAIN_VALVE_ANGLE:
-          float angle;
-          memcpy(&angle, &message.data[4], sizeof(float));
+        {
+          short rdata = message.data[0]-120;
+          Serial1.print("rdata: ");
+          Serial1.println(rdata);
+          float angle = rdata * 8000 / 270 + 7000;
+          angle = 135 * (angle - 7500) / 4000;
           Serial1.print("MainAngle: ");
-          Serial1.println(angle, DEC);
-          break;
-        case CAN_ID_PLC_ACK:
+          Serial1.println(angle);
+        }
+        case CAN_ID_FROM_PLC_ACK:
+        {
           xSemaphoreTake(plcStatusMutex, portMAX_DELAY);
           lastPLCACK = millis();
-          Serial.print("PLC ACK received at ");
-          Serial.println(millis()-lastPLCACK);
           xSemaphoreGive(plcStatusMutex);
           break;
+        }
         default:
+        {
           break;
+        }
         }
       }
     }
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
@@ -215,23 +220,23 @@ void CANSendTask(void *pvParameters)
   {
     uint8_t data = 0;
     uint8_t ack = 0;
+    CAN.sendData(CAN_ID_TO_PLC_ACK, &ack, 1);
     bool firePressed, fdPressed;
-
     xSemaphoreTake(buttonStateMutex, portMAX_DELAY);
     firePressed = isFireButtonPressed;
     fdPressed = isfdPressed;
+    xSemaphoreGive(buttonStateMutex);
 
     data |= (digitalRead(DUMP_PIN) & 1) << 0;
     data |= (digitalRead(FILL_PIN) & 1) << 1;
     data |= (firePressed && !digitalRead(FD_PIN) && !digitalRead(FILL_PIN)) << 2; // FD押下中はFire無効
     data |= (fdPressed) << 3;
     data |= (digitalRead(VALVESET_PIN) & 1) << 4;
-    Serial.print("fd");
-    Serial.println(isfdPressed);
-    Serial.print("fire");
-    Serial.println(isFireButtonPressed);
+    // Serial.print("fd");
+    // Serial.println(isfdPressed);
+    // Serial.print("fire");
+    // Serial.println(isFireButtonPressed);
 
-    xSemaphoreGive(buttonStateMutex);
     CAN.sendData(CAN_ID_BUTTON_STATE, &data, 1);
     vTaskDelay(100 / portTICK_PERIOD_MS);
   }
