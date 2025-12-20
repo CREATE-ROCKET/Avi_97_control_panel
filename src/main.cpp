@@ -24,7 +24,7 @@ constexpr uint32_t CAN_ID_TO_PLC_ACK = 0x104;
 
 // --- Constants ---
 constexpr long PLC_TIMEOUT_MS = 3000;
-constexpr int DEBOUNCE_DELAY_MS = 20;
+constexpr int DEBOUNCE_DELAY_MS = 100;
 
 // --- Enums for State Management ---
 enum PLCStatus
