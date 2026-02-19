@@ -5,22 +5,24 @@
 #include <freertos/semphr.h>
 
 // --- Pin Definitions --- 12と13も使えるかも(separation に使う可能性)
-constexpr uint8_t FILL_PIN = 16;
-constexpr uint8_t VALVESET_PIN = 4;
-constexpr uint8_t DUMP_PIN = 34;
-constexpr uint8_t FIRE_PIN = 35;
-constexpr uint8_t FD_PIN = 17;
-constexpr uint8_t MCU_LUMP_PIN = 15;
-constexpr uint8_t CAN_TX_PIN = 32;
-constexpr uint8_t CAN_RX_PIN = 33;
-constexpr uint8_t SERIAL1_RX_PIN = 21;
-constexpr uint8_t SERIAL1_TX_PIN = 18;
+constexpr uint8_t FILL_PIN = 21;
+constexpr uint8_t VALVESET_PIN = 19;
+constexpr uint8_t DUMP_PIN = 16;
+constexpr uint8_t FIRE_PIN = 18;
+constexpr uint8_t O2_PIN = 34;
+constexpr uint8_t SEPARATE_PIN = 17;
+constexpr uint8_t MCU_LUMP_PIN = 25;
+constexpr uint8_t CAN_TX_PIN = 26;
+constexpr uint8_t CAN_RX_PIN = 27;
+constexpr uint8_t SERIAL1_RX_PIN = 32;
+constexpr uint8_t SERIAL1_TX_PIN = 33;
 
 // --- CAN ID Definitions ---
 constexpr uint32_t CAN_ID_BUTTON_STATE = 0x101;
 constexpr uint32_t CAN_ID_MAIN_VALVE_ANGLE = 0x102;
 constexpr uint32_t CAN_ID_FROM_PLC_ACK = 0x103;
 constexpr uint32_t CAN_ID_TO_PLC_ACK = 0x104;
+constexpr uint32_t CAN_ID_O2_TEST = 0x10a;
 
 // --- Constants ---
 constexpr long PLC_TIMEOUT_MS = 3000;
@@ -68,7 +70,7 @@ void setup()
   pinMode(VALVESET_PIN, INPUT);
   pinMode(DUMP_PIN, INPUT);
   pinMode(FIRE_PIN, INPUT);
-  pinMode(FD_PIN, INPUT);
+  pinMode(SEPARATE_PIN, INPUT);
 
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
@@ -108,7 +110,7 @@ void loop()
 {
   updatePLCStatus();
   updateButtonState(fireButtonState, isFireButtonPressed, fireDebounceTimer, FIRE_PIN);
-  updateButtonState(FDButtonState, isfdPressed, fdDebounceTimer, FD_PIN);
+  updateButtonState(FDButtonState, isfdPressed, fdDebounceTimer, SEPARATE_PIN);
   delay(100);
 }
 
@@ -188,7 +190,7 @@ void CANRecvTask(void *pvParameters)
         {
         case CAN_ID_MAIN_VALVE_ANGLE:
         {
-          short rdata = message.data[0]-120;
+          short rdata = message.data[0] - 120;
           Serial1.print("rdata: ");
           Serial1.println(rdata);
           float angle = rdata * 8000 / 270 + 7000;
@@ -229,7 +231,7 @@ void CANSendTask(void *pvParameters)
 
     data |= (digitalRead(DUMP_PIN) & 1) << 0;
     data |= (digitalRead(FILL_PIN) & 1) << 1;
-    data |= (firePressed && !digitalRead(FD_PIN) && !digitalRead(FILL_PIN)) << 2; // FD押下中はFire無効
+    data |= (firePressed && !digitalRead(SEPARATE_PIN) && !digitalRead(FILL_PIN)) << 2; // FD押下中はFire無効
     data |= (fdPressed) << 3;
     data |= (digitalRead(VALVESET_PIN) & 1) << 4;
     // Serial.print("fd");
